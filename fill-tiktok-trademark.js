@@ -10,10 +10,12 @@ const EMAIL = "begsondye@kpost.be";
 const FORM_URL =
   "https://ipr.tiktokforbusiness.com/legal/report/Trademark?issueType=1&behalf=2&sole=2";
 
-const proofPath = path.resolve(__dirname, "POA.pdf"); // Proof of authorization
-const certificatePath = path.resolve(__dirname, "dd1.pdf"); // Scan of registration certificate (nếu có)
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// ủy quyền POA
+const proofPath = path.resolve(__dirname, "POA.pdf"); 
+// giấy chứng nhận nhãn hiệu
+const certificatePath = path.resolve(__dirname, "dd1.pdf"); 
 // Dữ liệu form chính
 const data = {
   name: "Vo Van Thanh Tai",
@@ -30,8 +32,7 @@ const data = {
     "https://www.tiktok.com/@fakebrand/video/2222222222222222222",
   ],
   personalAccount: "No",
-  description:
-    "The account uses our registered trademark without authorization.",
+  description: "The account uses our registered trademark without authorization.",
   signature: "Vo Van Thanh Tai",
 };
 /** ====================================== */
@@ -70,11 +71,10 @@ async function typeInto(page, containerId, value, isTextarea = false) {
     return;
   }
 
-  // ---- Textarea path (robust) ----
-  await page.waitForSelector(`#${esc}, [id="${containerId}"]`, {
-    timeout: 60000,
-  });
+  // ---- Textarea path (CONTAINER-ONLY) ----
+  await page.waitForSelector(`#${esc}, [id="${containerId}"]`, { timeout: 60000 });
 
+  // scroll vào giữa
   await page.evaluate((rawId) => {
     const safe =
       window.CSS && CSS.escape
@@ -86,11 +86,12 @@ async function typeInto(page, containerId, value, isTextarea = false) {
     if (el) el.scrollIntoView({ block: "center" });
   }, containerId);
 
+  // chỉ tìm bên trong container
   const selectors = [
     `#${esc} textarea`,
     `[id="${containerId}"] textarea`,
     `#${esc} [contenteditable="true"]`,
-    `textarea[placeholder*="tiktok.com"]`,
+    `[id="${containerId}"] [contenteditable="true"]`,
   ];
 
   let handle = null;
@@ -101,14 +102,47 @@ async function typeInto(page, containerId, value, isTextarea = false) {
 
   if (handle) {
     try {
-      await handle.click({ clickCount: 3 });
-      await page.keyboard.type(value || "");
+      await handle.evaluate((node) => node.scrollIntoView({ block: "center" }));
+      await handle.click();
+      // Ctrl/Cmd + A để xoá hết
+      const isMac = await page.evaluate(() => navigator.platform.includes('Mac'));
+      if (isMac) {
+        await page.keyboard.down("Meta");
+      } else {
+        await page.keyboard.down("Control");
+      }
+      await page.keyboard.press("KeyA");
+      if (isMac) {
+        await page.keyboard.up("Meta");
+      } else {
+        await page.keyboard.up("Control");
+      }
+
+      // gõ giá trị
+      if (await handle.evaluate((n) => "value" in n)) {
+        await handle.type(value || "");
+      } else {
+        // contenteditable
+        await page.evaluate(
+          (el, v) => {
+            el.textContent = v || "";
+            el.dispatchEvent(new Event("input", { bubbles: true }));
+            el.dispatchEvent(new Event("change", { bubbles: true }));
+          },
+          handle,
+          value || ""
+        );
+      }
+      // phát sự kiện an toàn
+      await handle.evaluate((el) => {
+        el.dispatchEvent(new Event("input", { bubbles: true }));
+        el.dispatchEvent(new Event("change", { bubbles: true }));
+      });
       return;
-    } catch {
-      /* fallback xuống DOM set */
-    }
+    } catch { /* rơi xuống DOM-set */ }
   }
 
+  // Fallback DOM-set nhưng CHỈ trong container
   const ok = await page.evaluate(({ rawId, val }) => {
     const safe =
       window.CSS && CSS.escape
@@ -119,14 +153,13 @@ async function typeInto(page, containerId, value, isTextarea = false) {
       document.querySelector(`[id="${rawId}"]`);
     if (!root) return false;
     const ta =
-      root.querySelector("textarea") || root.querySelector('[contenteditable="true"]');
+      root.querySelector("textarea") ||
+      root.querySelector('[contenteditable="true"]');
     if (!ta) return false;
 
     if ("value" in ta) {
-      ta.focus();
       ta.value = val || "";
     } else {
-      ta.focus();
       ta.textContent = val || "";
     }
     ta.dispatchEvent(new Event("input", { bubbles: true }));
@@ -160,17 +193,13 @@ async function uploadFile(page, containerId, filePath) {
   }
 
   if (!input) throw new Error(`Không tìm thấy input file cho "${containerId}"`);
-
-  // KHÔNG dùng visible vì input thường ẩn
-  await input.uploadFile(filePath);
+  await input.uploadFile(filePath); // input có thể ẩn, KHÔNG ép visible
 }
 
 // chọn radio theo label (dùng cho các nhóm bình thường)
 async function clickRadioByLabel(page, containerId, wantedText) {
   const esc = cssEscapeId(containerId);
-  await page.waitForSelector(`#${esc}, [id="${containerId}"]`, {
-    visible: true,
-  });
+  await page.waitForSelector(`#${esc}, [id="${containerId}"]`, { visible: true });
 
   const ok = await page.evaluate(({ containerId, wantedText }) => {
     const root =
@@ -180,8 +209,8 @@ async function clickRadioByLabel(page, containerId, wantedText) {
     if (!root) return false;
     const labels = root.querySelectorAll("label");
     for (const lb of labels) {
-      const t = lb.textContent?.trim().toLowerCase();
-      if (t && t.includes(wantedText.toLowerCase())) {
+      const t = (lb.textContent || "").trim().toLowerCase();
+      if (t.includes(wantedText.toLowerCase())) {
         const input =
           lb.querySelector('input[type="radio"]') ||
           lb.closest("div")?.querySelector('input[type="radio"]');
@@ -210,9 +239,8 @@ async function tickAllCheckboxes(page, containerId) {
   if (realInputs.length) {
     for (const cb of realInputs) {
       await cb.evaluate((el) => el.scrollIntoView({ block: "center" }));
-      try {
-        await cb.click({ offset: { x: 4, y: 4 } });
-      } catch {
+      try { await cb.click({ offset: { x: 4, y: 4 } }); }
+      catch {
         const parent = (await cb.getProperty("parentElement")).asElement();
         if (parent) await parent.click();
       }
@@ -238,10 +266,7 @@ async function clickButtonByText(page, text) {
       const v = norm(el.value);
       return t === norm(wanted) || v === norm(wanted);
     });
-    if (target) {
-      target.click();
-      return true;
-    }
+    if (target) { target.click(); return true; }
     return false;
   }, text);
   return clicked;
@@ -249,7 +274,7 @@ async function clickButtonByText(page, text) {
 
 /** Chọn "No" cho “Is this an issue related to counterfeit goods?”  */
 async function selectIssueNo(page) {
-  const name = "extra.cfGoods"; // đúng ID (F,G viết hoa)
+  const name = "extra.cfGoods";
   await waitForContainer(page, name);
 
   const radios = await page.$$(`input[type="radio"][name="${name}"]`);
@@ -272,13 +297,8 @@ async function selectIssueNo(page) {
       document.querySelector(`[id="${name}"]`);
     if (!root) return false;
     const labs = Array.from(root.querySelectorAll("label"));
-    const lb = labs.find(
-      (l) => (l.textContent || "").trim().toLowerCase() === "no"
-    );
-    if (lb) {
-      lb.click();
-      return true;
-    }
+    const lb = labs.find((l) => (l.textContent || "").trim().toLowerCase() === "no");
+    if (lb) { lb.click(); return true; }
     return false;
   }, name);
   if (byLabel) return;
@@ -292,19 +312,15 @@ async function selectIssueNo(page) {
       document.querySelector(`#${safe}`) ||
       document.querySelector(`[id="${name}"]`);
     const boxes = root?.querySelectorAll("div._TUXRadioStandalone-container");
-    if (boxes && boxes[1]) {
-      boxes[1].click();
-      return true;
-    }
+    if (boxes && boxes[1]) { boxes[1].click(); return true; }
     return false;
   }, name);
   if (byBox) return;
 
   const forced = await page.evaluate((name) => {
     const ip =
-      document.querySelector(
-        `input[type="radio"][name="${name}"][value="0"]`
-      ) || document.querySelectorAll(`input[type="radio"][name="${name}"]`)[1];
+      document.querySelector(`input[type="radio"][name="${name}"][value="0"]`) ||
+      document.querySelectorAll(`input[type="radio"][name="${name}"]`)[1];
     if (!ip) return false;
     ip.checked = true;
     ip.dispatchEvent(new Event("input", { bubbles: true }));
@@ -317,62 +333,60 @@ async function selectIssueNo(page) {
 /** Điền trường URLs (records) chắc chắn */
 async function typeRecords(page, records) {
   const value = (records || []).join("\n");
+
   // 1) chờ container #link (div bao ngoài)
   await page.waitForSelector('#' + cssEscapeId('link') + ', [id="link"]', { timeout: 60000 });
 
-  // 2) thử các selector khả dĩ để lấy đúng <textarea>
-  const selectors = [
-    `#${cssEscapeId('link')} textarea`,              // textarea trong container #link
-    `[id="link"] textarea`,                          // bản không escape (phòng hờ)
-    `textarea[placeholder^="e.g.https://www.tiktok.com"]`, // theo placeholder mẫu
-    'div.input-textarea-container textarea',         // lớp khung của TikTok
-  ];
-
-  let el = null;
-  for (const s of selectors) {
-    el = await page.$(s);
-    if (el) break;
+  // 2) tìm đúng textarea bên trong #link
+  let el = await page.$(`#${cssEscapeId('link')} textarea`) ||
+           await page.$(`[id="link"] textarea`);
+  // TikTok đôi khi dùng contenteditable cho textarea
+  if (!el) {
+    el = await page.$(`#${cssEscapeId('link')} [contenteditable="true"]`) ||
+         await page.$(`[id="link"] [contenteditable="true"]`);
   }
-
-  // 3) nếu tìm thấy textarea => gõ bình thường
   if (el) {
     await el.evaluate(node => node.scrollIntoView({ block: 'center' }));
-    await el.click({ clickCount: 3 });
-    await el.type(value);
+    await el.click();
+    // Ctrl/Cmd + A rồi gõ
+    const isMac = await page.evaluate(() => navigator.platform.includes('Mac'));
+    if (isMac) await page.keyboard.down("Meta"); else await page.keyboard.down("Control");
+    await page.keyboard.press("KeyA");
+    if (isMac) await page.keyboard.up("Meta"); else await page.keyboard.up("Control");
+
+    if (await el.evaluate(n => 'value' in n)) {
+      await el.type(value);
+    } else {
+      await page.evaluate((node, v) => {
+        node.textContent = v;
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+      }, el, value);
+    }
+    await el.evaluate(n => {
+      n.dispatchEvent(new Event('input', { bubbles: true }));
+      n.dispatchEvent(new Event('change', { bubbles: true }));
+    });
     return;
   }
 
-  // 4) fallback: set trực tiếp value + phát sự kiện trong DOM
+  // 3) fallback DOM-set trong #link
   const ok = await page.evaluate((val) => {
     const root = document.querySelector('#link') || document.querySelector('[id="link"]');
     if (!root) return false;
-    const ta = root.querySelector('textarea') 
-           || document.querySelector('textarea[placeholder^="e.g.https://www.tiktok.com"]')
-           || root.querySelector('[contenteditable="true"]');
+    const ta = root.querySelector('textarea') || root.querySelector('[contenteditable="true"]');
     if (!ta) return false;
-
-    if ('value' in ta) {
-      ta.focus();
-      ta.value = val;
-    } else {
-      // contenteditable fallback
-      ta.focus();
-      ta.textContent = val;
-    }
+    if ('value' in ta) ta.value = val; else ta.textContent = val;
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     ta.dispatchEvent(new Event('change', { bubbles: true }));
     return true;
   }, value);
-
   if (!ok) throw new Error('Không tìm thấy textarea cho phần "Content to report" (#link).');
 }
 
-
 // ========== Flows ==========
 async function doEmailStep(page, email) {
-  await page.waitForSelector(`#${cssEscapeId("email")} input[type="text"]`, {
-    visible: true,
-  });
+  await page.waitForSelector(`#${cssEscapeId("email")} input[type="text"]`, { visible: true });
   await page.type(`#${cssEscapeId("email")} input[type="text"]`, email);
 
   await sleep(300); // nhỏ để UI enable nút
@@ -384,13 +398,8 @@ async function doEmailStep(page, email) {
   }
 
   await Promise.race([
-    page.waitForSelector(`#${cssEscapeId("name")} input`, {
-      visible: true,
-      timeout: 60000,
-    }),
-    page
-      .waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 })
-      .catch(() => {}),
+    page.waitForSelector(`#${cssEscapeId("name")} input`, { visible: true, timeout: 60000 }),
+    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 }).catch(() => {}),
   ]);
 }
 
@@ -405,16 +414,10 @@ async function doMainForm(page) {
   await selectIssueNo(page);
 
   // Relationship → Authorized agent → lộ "authorizations"
-  await clickRadioByLabel(
-    page,
-    "relationship",
-    "I am an authorized agent of the trademark owner"
-  );
+  await clickRadioByLabel(page, "relationship", "I am an authorized agent of the trademark owner");
 
   // Upload Proof of authorization
-  await page.waitForSelector(`#${cssEscapeId("authorizations")}`, {
-    timeout: 60000,
-  });
+  await page.waitForSelector(`#${cssEscapeId("authorizations")}`, { timeout: 60000 });
   await uploadFile(page, "authorizations", proofPath);
 
   // Registration info
@@ -425,18 +428,20 @@ async function doMainForm(page) {
 
   // Upload certificate nếu có
   if (fs.existsSync(certificatePath)) {
-    await page.waitForSelector(`#${cssEscapeId("certificate")}`, {
-      timeout: 60000,
-    });
+    await page.waitForSelector(`#${cssEscapeId("certificate")}`, { timeout: 60000 });
     await uploadFile(page, "certificate", certificatePath);
   }
 
-  // Content to report
+  // Content to report (URLs)
   if (data.records?.length) {
-  await typeRecords(page, data.records);
-}
+    await typeRecords(page, data.records);
+  }
+
+  // Was the reported content taken from your personal TikTok account? -> No/Yes
   await clickRadioByLabel(page, "personalAccount", data.personalAccount);
-  await typeInto(page, "description", data.description, true);
+
+  // Description (textarea trong container #description)
+  await typeInto(page, "description", data.description);
 
   // Statements (3 checkbox)
   await tickAllCheckboxes(page, "agreement");
@@ -452,23 +457,17 @@ async function doMainForm(page) {
 (async () => {
   if (MODE === "attach") {
     // Chrome mở sẵn với remote debugging: chrome --remote-debugging-port=9222
-    const browser = await puppeteerCore.connect({
-      browserURL: "http://127.0.0.1:9222",
-    });
+    const browser = await puppeteerCore.connect({ browserURL: "http://127.0.0.1:9222" });
     const pages = await browser.pages();
 
     let page = null;
     for (const p of pages) {
       try {
-        if (await p.$(`#${cssEscapeId("name")} input`)) {
-          page = p;
-          break;
-        }
+        if (await p.$(`#${cssEscapeId("name")} input`)) { page = p; break; }
       } catch {}
     }
     if (!page) {
-      page =
-        pages.find((p) => p.url().includes("/legal/report/Trademark")) || pages[0];
+      page = pages.find((p) => p.url().includes("/legal/report/Trademark")) || pages[0];
       await page.bringToFront();
       if (await page.$(`#${cssEscapeId("email")} input[type="text"]`)) {
         await doEmailStep(page, EMAIL);
