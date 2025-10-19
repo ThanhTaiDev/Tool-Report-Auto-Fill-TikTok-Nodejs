@@ -1,41 +1,22 @@
 // npm i puppeteer puppeteer-core
 const puppeteer = require("puppeteer");
 const puppeteerCore = require("puppeteer-core");
-const path = require("path");
 const fs = require("fs");
 
-/** ============== CẤU HÌNH ============== */
-const MODE = process.env.MODE || "full"; // "full" | "attach"
-const EMAIL = "begsondye@kpost.be";
-const FORM_URL =
-  "https://ipr.tiktokforbusiness.com/legal/report/Trademark?issueType=1&behalf=2&sole=2";
+// ⬇️ Lấy dữ liệu/đường dẫn/URL từ file riêng
+const {
+  EMAIL,
+  FORM_URL,
+  proofPath,
+  certificatePath,
+  data,
+} = require("./form-data");
 
+// Chế độ chạy: full | attach
+const MODE = process.env.MODE || "full";
+
+// Utility nhỏ
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-
-// ủy quyền POA
-const proofPath = path.resolve(__dirname, "POA.pdf"); 
-// giấy chứng nhận nhãn hiệu
-const certificatePath = path.resolve(__dirname, "dd1.pdf"); 
-// Dữ liệu form chính
-const data = {
-  name: "Vo Van Thanh Tai",
-  nameOfOwner: "Disney Enterprises, Inc.",
-  address: "500 S Buena Vista St, Burbank, CA 91521, USA",
-  phoneNumber: "+84 909 999 999",
-  // email ở form lớn là read-only -> không điền lại
-  jurisdiction: "United States",
-  registrationNumber: "1234567",
-  goods: "Class 25 – Clothing, footwear, headgear",
-  recordUrl: "https://tmsearch.uspto.gov/trademark/example",
-  records: [
-    "https://www.tiktok.com/@fakebrand/video/1111111111111111111",
-    "https://www.tiktok.com/@fakebrand/video/2222222222222222222",
-  ],
-  personalAccount: "No",
-  description: "The account uses our registered trademark without authorization.",
-  signature: "Vo Van Thanh Tai",
-};
-/** ====================================== */
 
 // ========== Helpers ==========
 const cssEscapeId = (id) =>
