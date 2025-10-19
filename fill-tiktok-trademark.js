@@ -2,21 +2,23 @@
 const puppeteer = require("puppeteer");
 const puppeteerCore = require("puppeteer-core");
 const path = require("path");
+const fs = require("fs"); 
 
 /** ============== CẤU HÌNH ============== */
 const MODE = process.env.MODE || "full"; // "full" | "attach"
-const EMAIL = "begsondye@kpost.be";       // email bước Verify
+const EMAIL = "begsondye@kpost.be";
 const FORM_URL = "https://ipr.tiktokforbusiness.com/legal/report/Trademark?issueType=1&behalf=2&sole=2";
 
 const proofPath = path.resolve(__dirname, "POA.pdf"); // Proof of authorization
-
+const certificatePath = path.resolve(__dirname, "dd1.pdf"); // tên file bạn có
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // Dữ liệu form chính
 const data = {
   name: "Vo Van Thanh Tai",
   nameOfOwner: "Disney Enterprises, Inc.",
   address: "500 S Buena Vista St, Burbank, CA 91521, USA",
   phoneNumber: "+84 909 999 999",
-  email: "law@disney.com",
+  // email ở form lớn là read-only -> không điền lại
   jurisdiction: "United States",
   registrationNumber: "1234567",
   goods: "Class 25 – Clothing, footwear, headgear",
@@ -35,20 +37,17 @@ const data = {
 const cssEscapeId = (id) =>
   id.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
 
-// chờ container theo cả #extra\.c6goods và [id="extra.c6goods"]
+// chờ container theo cả #id đã escape và [id="..."]
 async function waitForContainer(page, rawId) {
   const esc = cssEscapeId(rawId);
-  const sel1 = `#${esc}`;
-  const sel2 = `[id="${rawId}"]`;
-  await page.waitForSelector(`${sel1}, ${sel2}`, { visible: true, timeout: 60000 });
-  // kéo vào giữa màn hình để các radio/checkbox nhận click chắc hơn
+  await page.waitForSelector(`#${esc}, [id="${rawId}"]`, { visible: true, timeout: 60000 });
   await page.evaluate((rawId) => {
-    const el = document.querySelector(`#${rawId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1")}`) 
-            || document.querySelector(`[id="${rawId}"]`);
-    if (el) el.scrollIntoView({ block: "center", behavior: "instant" });
+    const safe = (window.CSS && CSS.escape) ? CSS.escape(rawId)
+      : rawId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
+    const el = document.querySelector(`#${safe}`) || document.querySelector(`[id="${rawId}"]`);
+    if (el) el.scrollIntoView({ block: "center" });
   }, rawId);
 }
-
 
 async function typeInto(page, containerId, value, isTextarea = false) {
   const esc = cssEscapeId(containerId);
@@ -62,18 +61,42 @@ async function typeInto(page, containerId, value, isTextarea = false) {
 
 async function uploadFile(page, containerId, filePath) {
   const esc = cssEscapeId(containerId);
-  const sel = `#${esc} input[type="file"]`;
-  await page.waitForSelector(sel, { visible: true });
-  const file = await page.$(sel);
-  await file.uploadFile(filePath);
+
+  // 1) tìm input bên trong container
+  let input = await page.$(`#${esc} input[type="file"]`);
+
+  // 2) nếu không thấy, thử theo quy ước id "input-file-<containerId>"
+  if (!input) input = await page.$(`#input-file-${containerId}`);
+
+  // 3) nếu vẫn chưa có, click label để framework render input rồi lấy lại
+  if (!input) {
+    const label =
+      (await page.$(`#${esc} label[for]`)) ||
+      (await page.$(`#${esc} .choose-file-button`)) ||
+      (await page.$(`label[for="input-file-${containerId}"]`));
+    if (label) await label.click();
+    // chờ ngắn cho DOM cập nhật (không dùng waitForTimeout nếu bản puppeteer của bạn không có)
+    await new Promise(r => setTimeout(r, 200));
+    input =
+      (await page.$(`#${esc} input[type="file"]`)) ||
+      (await page.$(`#input-file-${containerId}`));
+  }
+
+  if (!input) throw new Error(`Không tìm thấy input file cho "${containerId}"`);
+
+  // LƯU Ý: KHÔNG dùng {visible:true} vì input thường bị ẩn
+  await input.uploadFile(filePath);
 }
 
+
+// chọn radio theo label (dùng cho các nhóm bình thường)
 async function clickRadioByLabel(page, containerId, wantedText) {
   const esc = cssEscapeId(containerId);
-  await page.waitForSelector(`#${esc}`, { visible: true });
+  await page.waitForSelector(`#${esc}, [id="${containerId}"]`, { visible: true });
 
   const ok = await page.evaluate(({ containerId, wantedText }) => {
-    const root = document.querySelector(`#${containerId}`);
+    const root = document.querySelector(`#${containerId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1")}`) ||
+                 document.querySelector(`[id="${containerId}"]`);
     if (!root) return false;
     const labels = root.querySelectorAll("label");
     for (const lb of labels) {
@@ -82,7 +105,7 @@ async function clickRadioByLabel(page, containerId, wantedText) {
         const input =
           lb.querySelector('input[type="radio"]') ||
           lb.closest("div")?.querySelector('input[type="radio"]');
-        if (input) { (input).click(); return true; }
+        if (input) { input.click(); input.dispatchEvent(new Event("change", { bubbles: true })); return true; }
       }
     }
     return false;
@@ -111,7 +134,6 @@ async function tickAllCheckboxes(page, containerId) {
     }
     return;
   }
-  // fallback: một số UI ẩn input, click wrapper/label
   const wrappers = await page.$$(
     `#${esc} [data-tux-checkbox-input-wrapper="true"], #${esc} label`
   );
@@ -119,77 +141,129 @@ async function tickAllCheckboxes(page, containerId) {
 }
 
 async function clickButtonByText(page, text) {
-  // Tìm tất cả button/role=button/input submit rồi so text
   const clicked = await page.evaluate((wanted) => {
     const nodes = [
-      ...document.querySelectorAll('button'),
+      ...document.querySelectorAll("button"),
       ...document.querySelectorAll('[role="button"]'),
       ...document.querySelectorAll('input[type="submit"], input[type="button"]'),
     ];
     const norm = (s) => (s || "").replace(/\s+/g, " ").trim().toLowerCase();
-
     const target = nodes.find((el) => {
       const t = norm(el.innerText || el.textContent);
       const v = norm(el.value);
       return t === norm(wanted) || v === norm(wanted);
     });
-    if (target) {
-      target.click();
-      return true;
-    }
+    if (target) { target.click(); return true; }
     return false;
   }, text);
-
   return clicked;
+}
+
+/** Chọn "No" cho “Is this an issue related to counterfeit goods?”  */
+async function selectIssueNo(page) {
+  const name = "extra.cfGoods";                 // ✅ đúng ID (F,G viết hoa)
+  await waitForContainer(page, name);           // scroll vào tầm nhìn
+
+  // C1: click trực tiếp radio thứ 2 (thường là "No")
+  const radios = await page.$$(`input[type="radio"][name="${name}"]`);
+  if (radios.length >= 2) {
+    await radios[1].evaluate(el => el.scrollIntoView({ block: "center" }));
+    try {
+      await radios[1].click({ offset: { x: 4, y: 4 } });
+      const ok = await page.evaluate(el => el.checked, radios[1]);
+      if (ok) return;
+    } catch {}
+  }
+
+  // C2: click label có chữ "No"
+  const byLabel = await page.evaluate((name) => {
+    const safe = (window.CSS && CSS.escape) ? CSS.escape(name)
+      : name.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
+    const root = document.querySelector(`#${safe}`) || document.querySelector(`[id="${name}"]`);
+    if (!root) return false;
+    const labs = Array.from(root.querySelectorAll("label"));
+    const lb = labs.find(l => (l.textContent || "").trim().toLowerCase() === "no");
+    if (lb) { lb.click(); return true; }
+    return false;
+  }, name);
+  if (byLabel) return;
+
+  // C3: click container radio thứ 2 (UI tuỳ biến của TUX)
+  const byBox = await page.evaluate((name) => {
+    const safe = (window.CSS && CSS.escape) ? CSS.escape(name)
+      : name.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
+    const root = document.querySelector(`#${safe}`) || document.querySelector(`[id="${name}"]`);
+    const boxes = root?.querySelectorAll("div._TUXRadioStandalone-container");
+    if (boxes && boxes[1]) { boxes[1].click(); return true; }
+    return false;
+  }, name);
+  if (byBox) return;
+
+  // C4: ép trạng thái + phát sự kiện (fallback cuối)
+  const forced = await page.evaluate((name) => {
+    const ip = document.querySelector(`input[type="radio"][name="${name}"][value="0"]`)
+             || document.querySelectorAll(`input[type="radio"][name="${name}"]`)[1];
+    if (!ip) return false;
+    ip.checked = true;
+    ip.dispatchEvent(new Event("input", { bubbles: true }));
+    ip.dispatchEvent(new Event("change", { bubbles: true }));
+    return ip.checked;
+  }, name);
+  if (!forced) throw new Error("Không chọn được 'No' ở Issue type (extra.cFGoods)");
 }
 
 
 // ========== Flows ==========
 async function doEmailStep(page, email) {
-  // ô email nằm trong container id="email"
   await page.waitForSelector(`#${cssEscapeId("email")} input[type="text"]`, { visible: true });
   await page.type(`#${cssEscapeId("email")} input[type="text"]`, email);
 
-  // click Next
+  await sleep(300); // nhỏ để UI enable nút
+
   const clicked = await clickButtonByText(page, "Next");
   if (!clicked) {
-    // fallback: click button đỏ đầu tiên trong section
-    const btn = await page.$('button');
+    const btn = await page.$("button");
     if (btn) await btn.click();
   }
 
-  // đợi tới khi form lớn xuất hiện (ví dụ container #name)
-  await page.waitForSelector(`#${cssEscapeId("name")} input`, { visible: true, timeout: 60000 });
+  await Promise.race([
+    page.waitForSelector(`#${cssEscapeId("name")} input`, { visible: true, timeout: 60000 }),
+    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 }).catch(() => {})
+  ]);
 }
 
+
 async function doMainForm(page) {
-  // Contact info
+  // Contact info (KHÔNG điền email vì read-only)
   await typeInto(page, "name", data.name);
   await typeInto(page, "nameOfOwner", data.nameOfOwner);
   await typeInto(page, "address", data.address);
   await typeInto(page, "phoneNumber", data.phoneNumber);
 
-  // Issue type → chọn No (container id có dấu chấm)
-  await waitForContainer(page, "extra.c6goods");
-  await clickRadioByLabel(page, "extra.c6goods", "No");
+  // Issue type → chọn No
+  await selectIssueNo(page);
 
-  // Relationship → Authorized agent → sẽ lộ "authorizations"
+  // Relationship → Authorized agent → lộ "authorizations"
   await clickRadioByLabel(page, "relationship", "I am an authorized agent of the trademark owner");
 
   // Upload Proof of authorization
-  await page.waitForSelector(`#${cssEscapeId("authorizations")}`, { visible: true });
-  await uploadFile(page, "authorizations", proofPath);
+// Sau khi đã chọn "I am an authorized agent..." và trường hiện ra
+await page.waitForSelector(`#${cssEscapeId("authorizations")}`, { timeout: 60000 });
+await uploadFile(page, "authorizations", proofPath);
+
 
   // Registration info
   await typeInto(page, "jurisdiction", data.jurisdiction);
   await typeInto(page, "registrationNumber", data.registrationNumber);
-  await typeInto(page, "goods", data.goods);
-
-  // (nếu có chứng nhận đăng ký riêng: #certificate)
-  // await uploadFile(page, "certificate", path.resolve(__dirname, "certificate.pdf"));
-
+await typeInto(page, "goodsServiceClass", data.goods);
   if (data.recordUrl) await typeInto(page, "recordUrl", data.recordUrl);
 
+  if (fs.existsSync(certificatePath)) {
+  // chờ container xuất hiện rồi upload
+  await page.waitForSelector(`#${cssEscapeId("certificate")}`, { timeout: 60000 });
+  await uploadFile(page, "certificate", certificatePath);   // dùng lại hàm uploadFile đã viết
+  // (hàm này đã hỗ trợ cả #certificate input[type="file"] và #input-file-certificate)
+}
   // Content to report
   if (data.records?.length) {
     await typeInto(page, "records", data.records.join("\n"), true);
@@ -203,40 +277,31 @@ async function doMainForm(page) {
   // Signature
   await typeInto(page, "signature", data.signature);
 
-  // Gửi nếu muốn:
+  // // Gửi nếu muốn:
   // await clickButtonByText(page, "Send");
 }
 
 // ========== Entrypoints ==========
 (async () => {
   if (MODE === "attach") {
-    // Bạn tự điền email và bấm Next trước.
-    // Mở Chrome với remote debugging:  chrome --remote-debugging-port=9222
+    // Chrome mở sẵn với remote debugging: chrome --remote-debugging-port=9222
     const browser = await puppeteerCore.connect({ browserURL: "http://127.0.0.1:9222" });
     const pages = await browser.pages();
 
-    // cố gắng tìm tab đã mở form lớn (có #name)
     let page = null;
     for (const p of pages) {
-      try {
-        if (await p.$(`#${cssEscapeId("name")} input`)) { page = p; break; }
-      } catch {}
+      try { if (await p.$(`#${cssEscapeId("name")} input`)) { page = p; break; } } catch {}
     }
-    // nếu chưa bấm Next, dùng tab có URL chứa /legal/report/Trademark và làm luôn bước email
     if (!page) {
       page = pages.find(p => p.url().includes("/legal/report/Trademark")) || pages[0];
       await page.bringToFront();
       if (await page.$(`#${cssEscapeId("email")} input[type="text"]`)) {
-        await doEmailStep(page, EMAIL); // tự gõ email + Next
-      } else {
-        // đã qua email -> nothing
+        await doEmailStep(page, EMAIL);
       }
     }
-
     await page.bringToFront();
     await doMainForm(page);
     console.log("✅ Đã điền xong form (attach).");
-
   } else {
     // FULL: tool làm cả email + form
     const browser = await puppeteer.launch({ headless: false, defaultViewport: null });
