@@ -263,7 +263,7 @@ async function selectIssueNo(page) {
     await radios[1].evaluate((el) => el.scrollIntoView({ block: "center" }));
     try {
       await radios[1].click({ offset: { x: 4, y: 4 } });
-      const ok = await page.evaluate((el) => el.checked, radios[1]);
+      const ok = await page.evaluate((el) => el.checked, radios[0]);
       if (ok) return;
     } catch {}
   }
@@ -278,7 +278,7 @@ async function selectIssueNo(page) {
       document.querySelector(`[id="${name}"]`);
     if (!root) return false;
     const labs = Array.from(root.querySelectorAll("label"));
-    const lb = labs.find((l) => (l.textContent || "").trim().toLowerCase() === "no");
+    const lb = labs.find((l) => (l.textContent || "").trim() === "Yes");
     if (lb) { lb.click(); return true; }
     return false;
   }, name);
@@ -308,7 +308,7 @@ async function selectIssueNo(page) {
     ip.dispatchEvent(new Event("change", { bubbles: true }));
     return ip.checked;
   }, name);
-  if (!forced) throw new Error("Không chọn được 'No' ở Issue type (extra.cFGoods)");
+  if (!forced) throw new Error("Không chọn được 'yes' ở Issue type (extra.cFGoods)");
 }
 
 /** Điền trường URLs (records) chắc chắn */
