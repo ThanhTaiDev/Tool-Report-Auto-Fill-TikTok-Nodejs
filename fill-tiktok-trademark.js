@@ -16,8 +16,11 @@ const {
   BATCH_SIZE,
 } = require("./form-data");
 
-// Chế độ chạy: full | attach
+// Chế độ chạy: full | attach (giữ cho tương lai nếu cần)
 const MODE = process.env.MODE || "full";
+
+// Tự động bấm Send sau khi điền form
+const AUTO_SUBMIT = true;
 
 // Utility nhỏ
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -38,12 +41,11 @@ async function waitForContainer(page, rawId) {
   }, rawId);
 }
 
-// gõ text tự nhận input / textarea
+// gõ text tự nhận input / textarea / contenteditable
 async function typeInto(page, containerId, value) {
   const esc = cssEscapeId(containerId);
   await page.waitForSelector(`#${esc}, [id="${containerId}"]`, { timeout: 60000 });
 
-  // thử các kiểu phần tử
   const selectors = [
     `#${esc} textarea`, `[id="${containerId}"] textarea`,
     `#${esc} input`, `[id="${containerId}"] input`,
@@ -61,6 +63,7 @@ async function typeInto(page, containerId, value) {
   if (tag === "input" || tag === "textarea") {
     await el.type(value || "");
   } else {
+    // contenteditable
     await page.keyboard.down("Control");
     await page.keyboard.press("A");
     await page.keyboard.up("Control");
@@ -195,6 +198,28 @@ async function typeRecords(page, records) {
   await el.type(value);
 }
 
+// ================== SUBMIT FLOW ==================
+async function submitAndConfirm(page) {
+  const clicked = await clickButtonByText(page, "Send");
+  if (!clicked) {
+    // dự phòng: tìm input submit/btn trong vùng cuối form
+    const btn = await page.$('button[type="submit"], input[type="submit"]');
+    if (btn) await btn.click();
+  }
+
+  // chờ một trong các tín hiệu thành công / chuyển trang
+  await Promise.race([
+    // toast/status của TUX (nếu có)
+    page.waitForSelector('.tux-toast, ._toast, [role="status"]', { timeout: 15000 }).catch(() => {}),
+    // form biến mất (name input không còn)
+    page.waitForSelector(`#${cssEscapeId("name")} input`, { hidden: true, timeout: 15000 }).catch(() => {}),
+    // điều hướng
+    page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 }).catch(() => {}),
+    // hoặc chỉ đơn giản nghỉ ngắn
+    sleep(3000),
+  ]);
+}
+
 // ================== FORM FLOW ==================
 async function doEmailStep(page, email) {
   await page.waitForSelector(`#${cssEscapeId("email")} input[type="text"]`, { visible: true });
@@ -251,13 +276,21 @@ async function doMainForm(page, urls = []) {
 
   // Signature
   await typeInto(page, "signature", data.signature);
+
+  // Auto submit nếu bật
+  if (AUTO_SUBMIT) {
+    await submitAndConfirm(page);
+  }
 }
 
 // ================== MAIN ==================
 (async () => {
-  const browser = await puppeteer.launch({ headless: false, defaultViewport: null });
-  const [page] = await browser.pages();
+  const browser = await puppeteer.launch({
+    headless: false,
+    defaultViewport: null,
+  });
 
+  const [page] = await browser.pages();
   await page.goto(FORM_URL, { waitUntil: "networkidle2" });
   await doEmailStep(page, EMAIL);
 
@@ -270,10 +303,10 @@ async function doMainForm(page, urls = []) {
     for (const [index, urls] of batches.entries()) {
       console.log(`🚀 Nhóm ${index + 1}/${batches.length}: ${urls.length} URL`);
       await doMainForm(page, urls);
-      console.log(`✅ Gửi xong nhóm ${index + 1}`);
+      console.log(`✅ Đã xử lý nhóm ${index + 1}`);
+
       if (index < batches.length - 1) {
-        console.log("⏳ Nghỉ 5 giây trước nhóm tiếp theo...");
-        await sleep(5000);
+        // Sau khi gửi xong 1 nhóm → nạp lại form & đi bước email
         await page.goto(FORM_URL, { waitUntil: "networkidle2" });
         await doEmailStep(page, EMAIL);
       }
@@ -284,5 +317,6 @@ async function doMainForm(page, urls = []) {
     console.log("✅ Đã gửi toàn bộ URL trong 1 lần.");
   }
 
+  // Đóng tự động nếu muốn:
   // await browser.close();
 })();
