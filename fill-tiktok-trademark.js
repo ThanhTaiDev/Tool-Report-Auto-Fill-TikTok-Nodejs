@@ -4,7 +4,7 @@ const puppeteer = require("puppeteer");
 const puppeteerCore = require("puppeteer-core");
 const fs = require("fs");
 
-// ⬇️ Lấy dữ liệu cấu hình & URL từ file riêng
+// Lấy dữ liệu cấu hình từ file riêng
 const {
   EMAIL,
   FORM_URL,
@@ -16,75 +16,96 @@ const {
   BATCH_SIZE,
 } = require("./form-data");
 
-// Chế độ chạy: full | attach (giữ cho tương lai nếu cần)
+// Cấu hình chạy
 const MODE = process.env.MODE || "full";
+const AUTO_SUBMIT = false;
 
-// Tự động bấm Send sau khi điền form
-const AUTO_SUBMIT = true;
+// Cấu hình tốc độ
+const TYPING_DELAY_MS = 45;          // Tốc độ gõ từng ký tự
+const BETWEEN_ACTION_MS = 250;        // Nghỉ giữa các thao tác nhỏ
+const RATE_LIMIT_MS = 3 * 60 * 1000;  // Nghỉ 3 phút sau mỗi đơn
 
-// Utility nhỏ
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// ================== HELPERS ==================
 const cssEscapeId = (id) =>
   id.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
 
 async function waitForContainer(page, rawId) {
   const esc = cssEscapeId(rawId);
-  await page.waitForSelector(`#${esc}, [id="${rawId}"]`, { visible: true, timeout: 60000 });
+  await page.waitForSelector(`#${esc}, [id="${rawId}"]`, {
+    visible: true,
+    timeout: 60000,
+  });
   await page.evaluate((rawId) => {
-    const safe = (window.CSS && CSS.escape)
-      ? CSS.escape(rawId)
-      : rawId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
-    const el = document.querySelector(`#${safe}`) || document.querySelector(`[id="${rawId}"]`);
+    const safe =
+      (window.CSS && CSS.escape)
+        ? CSS.escape(rawId)
+        : rawId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1");
+    const el =
+      document.querySelector(`#${safe}`) ||
+      document.querySelector(`[id="${rawId}"]`);
     if (el) el.scrollIntoView({ block: "center" });
   }, rawId);
 }
 
-// gõ text tự nhận input / textarea / contenteditable
+// gõ text tự nhiên
 async function typeInto(page, containerId, value) {
   const esc = cssEscapeId(containerId);
   await page.waitForSelector(`#${esc}, [id="${containerId}"]`, { timeout: 60000 });
 
   const selectors = [
-    `#${esc} textarea`, `[id="${containerId}"] textarea`,
-    `#${esc} input`, `[id="${containerId}"] input`,
-    `#${esc} [contenteditable="true"]`, `[id="${containerId}"] [contenteditable="true"]`,
+    `#${esc} textarea`,
+    `[id="${containerId}"] textarea`,
+    `#${esc} input`,
+    `[id="${containerId}"] input`,
+    `#${esc} [contenteditable="true"]`,
+    `[id="${containerId}"] [contenteditable="true"]`,
   ];
 
   let el = null;
-  for (const sel of selectors) { el = await page.$(sel); if (el) break; }
+  for (const sel of selectors) {
+    el = await page.$(sel);
+    if (el) break;
+  }
   if (!el) throw new Error(`Không tìm thấy input/textarea cho "${containerId}"`);
 
   await el.evaluate((n) => n.scrollIntoView({ block: "center" }));
-  try { await el.click({ clickCount: 3 }); } catch {}
+  try {
+    await el.click({ clickCount: 3 });
+  } catch {}
 
   const tag = await page.evaluate((n) => n.tagName.toLowerCase(), el);
   if (tag === "input" || tag === "textarea") {
-    await el.type(value || "");
+    await el.type(value || "", { delay: TYPING_DELAY_MS });
   } else {
-    // contenteditable
     await page.keyboard.down("Control");
     await page.keyboard.press("A");
     await page.keyboard.up("Control");
-    await page.keyboard.type(value || "");
+    await page.keyboard.type(value || "", { delay: TYPING_DELAY_MS });
   }
+  await sleep(BETWEEN_ACTION_MS);
 }
 
 async function uploadFile(page, containerId, filePath) {
   const esc = cssEscapeId(containerId);
-  let input = await page.$(`#${esc} input[type="file"]`) || await page.$(`#input-file-${containerId}`);
+  let input =
+    (await page.$(`#${esc} input[type="file"]`)) ||
+    (await page.$(`#input-file-${containerId}`));
 
   if (!input) {
-    const label = await page.$(`#${esc} label[for]`) ||
-                  await page.$(`#${esc} .choose-file-button`) ||
-                  await page.$(`label[for="input-file-${containerId}"]`);
+    const label =
+      (await page.$(`#${esc} label[for]`)) ||
+      (await page.$(`#${esc} .choose-file-button`)) ||
+      (await page.$(`label[for="input-file-${containerId}"]`));
     if (label) await label.click();
-    await new Promise((r) => setTimeout(r, 200));
-    input = await page.$(`#${esc} input[type="file"]`) || await page.$(`#input-file-${containerId}`);
+    await sleep(200);
+    input =
+      (await page.$(`#${esc} input[type="file"]`)) ||
+      (await page.$(`#input-file-${containerId}`));
   }
   if (!input) throw new Error(`Không tìm thấy input file cho "${containerId}"`);
   await input.uploadFile(filePath);
+  await sleep(BETWEEN_ACTION_MS);
 }
 
 async function clickRadioByLabel(page, containerId, wantedText) {
@@ -92,15 +113,17 @@ async function clickRadioByLabel(page, containerId, wantedText) {
   await page.waitForSelector(`#${esc}, [id="${containerId}"]`, { visible: true });
   const ok = await page.evaluate(({ containerId, wantedText }) => {
     const root =
-      document.querySelector(`#${containerId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1")}`) ||
-      document.querySelector(`[id="${containerId}"]`);
+      document.querySelector(
+        `#${containerId.replace(/([ #.;?%&,+*~:'"!^$[\]()=>|/@\\])/g, "\\$1")}`
+      ) || document.querySelector(`[id="${containerId}"]`);
     if (!root) return false;
     const labels = root.querySelectorAll("label");
     for (const lb of labels) {
       const t = (lb.textContent || "").trim().toLowerCase();
       if (t.includes(wantedText.toLowerCase())) {
-        const input = lb.querySelector('input[type="radio"]') ||
-                      lb.closest("div")?.querySelector('input[type="radio"]');
+        const input =
+          lb.querySelector('input[type="radio"]') ||
+          lb.closest("div")?.querySelector('input[type="radio"]');
         if (input) {
           input.click();
           input.dispatchEvent(new Event("change", { bubbles: true }));
@@ -118,6 +141,7 @@ async function clickRadioByLabel(page, containerId, wantedText) {
         : `#${esc} input[type="radio"]:last-of-type`;
     if (await page.$(sel)) await page.click(sel);
   }
+  await sleep(BETWEEN_ACTION_MS);
 }
 
 async function tickAllCheckboxes(page, containerId) {
@@ -126,16 +150,23 @@ async function tickAllCheckboxes(page, containerId) {
   if (realInputs.length) {
     for (const cb of realInputs) {
       await cb.evaluate((el) => el.scrollIntoView({ block: "center" }));
-      try { await cb.click({ offset: { x: 4, y: 4 } }); }
-      catch {
+      try {
+        await cb.click({ offset: { x: 4, y: 4 } });
+      } catch {
         const parent = (await cb.getProperty("parentElement")).asElement();
         if (parent) await parent.click();
       }
+      await sleep(BETWEEN_ACTION_MS);
     }
     return;
   }
-  const wrappers = await page.$$(`#${esc} [data-tux-checkbox-input-wrapper="true"], #${esc} label`);
-  for (const w of wrappers) await w.click();
+  const wrappers = await page.$$(
+    `#${esc} [data-tux-checkbox-input-wrapper="true"], #${esc} label`
+  );
+  for (const w of wrappers) {
+    await w.click();
+    await sleep(BETWEEN_ACTION_MS);
+  }
 }
 
 async function clickButtonByText(page, text) {
@@ -151,85 +182,66 @@ async function clickButtonByText(page, text) {
       const v = norm(el.value);
       return t === norm(wanted) || v === norm(wanted);
     });
-    if (target) { target.click(); return true; }
+    if (target) {
+      target.click();
+      return true;
+    }
     return false;
   }, text);
   return clicked;
 }
 
-// chọn "No" cho phần counterfeit goods
 async function selectIssueNo(page) {
   const name = "extra.cfGoods";
   await waitForContainer(page, name);
   const radios = await page.$$(`input[type="radio"][name="${name}"]`);
   if (radios.length >= 2) {
     await radios[1].evaluate((el) => el.scrollIntoView({ block: "center" }));
-    try {
-      await radios[1].click({ offset: { x: 4, y: 4 } });
-      const ok = await page.evaluate((el) => el.checked, radios[1]);
-      if (ok) return;
-    } catch {}
+    await radios[1].click({ offset: { x: 4, y: 4 } });
   }
-  await page.evaluate((name) => {
-    const ip = document.querySelectorAll(`input[type="radio"][name="${name}"]`)[1];
-    if (ip) {
-      ip.checked = true;
-      ip.dispatchEvent(new Event("input", { bubbles: true }));
-      ip.dispatchEvent(new Event("change", { bubbles: true }));
-    }
-  }, name);
+  await sleep(BETWEEN_ACTION_MS);
 }
 
-// điền URLs phần Content to report
 async function typeRecords(page, records) {
   const value = (records || []).join("\n");
-  await page.waitForSelector('#link, [id="link"]', { timeout: 60000 });
+  await page.waitForSelector("#link, [id='link']", { timeout: 60000 });
   const el =
-    (await page.$('#link textarea')) ||
-    (await page.$('[id="link"] textarea')) ||
-    (await page.$('#link [contenteditable="true"]')) ||
-    (await page.$('[id="link"] [contenteditable="true"]'));
+    (await page.$("#link textarea")) ||
+    (await page.$("[id='link'] textarea")) ||
+    (await page.$("#link [contenteditable='true']")) ||
+    (await page.$("[id='link'] [contenteditable='true']"));
   if (!el) throw new Error("Không tìm thấy textarea phần records.");
   await el.evaluate((n) => n.scrollIntoView({ block: "center" }));
   await el.click();
   await page.keyboard.down("Control");
   await page.keyboard.press("A");
   await page.keyboard.up("Control");
-  await el.type(value);
+  await el.type(value, { delay: TYPING_DELAY_MS });
+  await sleep(BETWEEN_ACTION_MS);
 }
 
-// ================== SUBMIT FLOW ==================
 async function submitAndConfirm(page) {
   const clicked = await clickButtonByText(page, "Send");
   if (!clicked) {
-    // dự phòng: tìm input submit/btn trong vùng cuối form
     const btn = await page.$('button[type="submit"], input[type="submit"]');
     if (btn) await btn.click();
   }
 
-  // chờ một trong các tín hiệu thành công / chuyển trang
   await Promise.race([
-    // toast/status của TUX (nếu có)
-    page.waitForSelector('.tux-toast, ._toast, [role="status"]', { timeout: 15000 }).catch(() => {}),
-    // form biến mất (name input không còn)
-    page.waitForSelector(`#${cssEscapeId("name")} input`, { hidden: true, timeout: 15000 }).catch(() => {}),
-    // điều hướng
+    page.waitForSelector(".tux-toast, [role='status']", { timeout: 15000 }).catch(() => {}),
     page.waitForNavigation({ waitUntil: "networkidle2", timeout: 15000 }).catch(() => {}),
-    // hoặc chỉ đơn giản nghỉ ngắn
-    sleep(3000),
+    sleep(4000),
   ]);
+
+  console.log("⏳ Nghỉ 3 phút trước khi gửi đơn kế tiếp...");
+  await sleep(RATE_LIMIT_MS);
 }
 
-// ================== FORM FLOW ==================
 async function doEmailStep(page, email) {
   await page.waitForSelector(`#${cssEscapeId("email")} input[type="text"]`, { visible: true });
-  await page.type(`#${cssEscapeId("email")} input[type="text"]`, email);
-  await sleep(300);
-  const clicked = await clickButtonByText(page, "Next");
-  if (!clicked) {
-    const btn = await page.$("button");
-    if (btn) await btn.click();
-  }
+  await page.type(`#${cssEscapeId("email")} input[type="text"]`, email, { delay: TYPING_DELAY_MS });
+  await sleep(BETWEEN_ACTION_MS);
+  await clickButtonByText(page, "Next");
   await Promise.race([
     page.waitForSelector(`#${cssEscapeId("name")} input`, { visible: true, timeout: 60000 }),
     page.waitForNavigation({ waitUntil: "networkidle2", timeout: 60000 }).catch(() => {}),
@@ -237,50 +249,31 @@ async function doEmailStep(page, email) {
 }
 
 async function doMainForm(page, urls = []) {
-  // Contact info
   await typeInto(page, "name", data.name);
   await typeInto(page, "nameOfOwner", data.nameOfOwner);
   await typeInto(page, "address", data.address);
   await typeInto(page, "phoneNumber", data.phoneNumber);
 
-  // Issue type → No
   await selectIssueNo(page);
-
-  // Relationship
   await clickRadioByLabel(page, "relationship", "I am an authorized agent");
-
-  // Upload proof
   await uploadFile(page, "authorizations", proofPath);
 
-  // Registration info
   await typeInto(page, "jurisdiction", data.jurisdiction);
   await typeInto(page, "registrationNumber", data.registrationNumber);
   await typeInto(page, "goodsServiceClass", data.goods);
   await typeInto(page, "recordUrl", data.recordUrl);
-  if (fs.existsSync(certificatePath)) {
-    await uploadFile(page, "certificate", certificatePath);
-  }
 
-  // URLs
+  if (fs.existsSync(certificatePath)) await uploadFile(page, "certificate", certificatePath);
+
   const records = urls.length ? urls : data.records;
   if (records?.length) await typeRecords(page, records);
 
-  // Personal account
   await clickRadioByLabel(page, "personalAccount", data.personalAccount);
-
-  // Description
   await typeInto(page, "description", data.description);
-
-  // Checkbox
   await tickAllCheckboxes(page, "agreement");
-
-  // Signature
   await typeInto(page, "signature", data.signature);
 
-  // Auto submit nếu bật
-  if (AUTO_SUBMIT) {
-    await submitAndConfirm(page);
-  }
+  if (AUTO_SUBMIT) await submitAndConfirm(page);
 }
 
 // ================== MAIN ==================
@@ -288,6 +281,7 @@ async function doMainForm(page, urls = []) {
   const browser = await puppeteer.launch({
     headless: false,
     defaultViewport: null,
+    // executablePath: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", // nếu cần
   });
 
   const [page] = await browser.pages();
@@ -296,27 +290,21 @@ async function doMainForm(page, urls = []) {
 
   if (BATCH_MODE) {
     const batches = [];
-    for (let i = 0; i < allUrls.length; i += BATCH_SIZE) {
+    for (let i = 0; i < allUrls.length; i += BATCH_SIZE)
       batches.push(allUrls.slice(i, i + BATCH_SIZE));
-    }
 
     for (const [index, urls] of batches.entries()) {
       console.log(`🚀 Nhóm ${index + 1}/${batches.length}: ${urls.length} URL`);
       await doMainForm(page, urls);
-      console.log(`✅ Đã xử lý nhóm ${index + 1}`);
-
+      console.log(`✅ Gửi xong nhóm ${index + 1}`);
       if (index < batches.length - 1) {
-        // Sau khi gửi xong 1 nhóm → nạp lại form & đi bước email
         await page.goto(FORM_URL, { waitUntil: "networkidle2" });
         await doEmailStep(page, EMAIL);
       }
     }
-    console.log("🎯 Đã gửi hết tất cả URL!");
+    console.log("🎯 Hoàn tất toàn bộ URL!");
   } else {
     await doMainForm(page, allUrls);
     console.log("✅ Đã gửi toàn bộ URL trong 1 lần.");
   }
-
-  // Đóng tự động nếu muốn:
-  // await browser.close();
 })();

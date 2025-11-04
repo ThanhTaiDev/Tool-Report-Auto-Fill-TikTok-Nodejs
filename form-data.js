@@ -19,13 +19,13 @@ const data = {
   signature: "Vo Van Thanh Tai",
 };
 // Ủy quyền LOA
-const proofPath = path.resolve(__dirname, "POA.pdf");
+const proofPath = path.resolve(__dirname, "LOA - The Anti-Counterfeiting Group (1).pdf");
 
 // chứng nhận đăng ký
-const certificatePath = path.resolve(__dirname, "dd1.pdf");
+const certificatePath = path.resolve(__dirname, "103683 - Certificate of Registration.pdf");
 
 // === Tùy chọn gửi ===
-const BATCH_SIZE = 1;      // gửi 1 video 1 lần
+const BATCH_SIZE = 3;      // gửi 1 video 1 lần
 const BATCH_MODE = true;   // true = bật gửi theo nhóm
 
 
